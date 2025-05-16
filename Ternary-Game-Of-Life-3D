@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Ternary Game of Life 2025.05.15 by @DoctorGoldOval with Gemini2.5 IT'S FOSS!</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; background-color: #111; color: #eee; }
+        canvas { display: block; }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            padding: 10px;
+            background-color: rgba(0,0,0,0.8);
+            border-radius: 5px;
+            color: #fff;
+            max-height: 90vh;
+            overflow-y: auto;
+            width: 320px; /* Increased width for more controls */
+        }
+        #controls p, #controls div > label { margin-bottom: 3px; display: block; }
+        #controls button { margin-top: 5px; margin-right: 5px; padding: 5px 10px; }
+        #controls input[type="range"] { width: 150px; margin-left: 5px; vertical-align: middle;}
+        #controls div > span { vertical-align: middle; } /* For speedValue and initialPopValue */
+        .rule-group {
+            border: 1px solid #555;
+            padding: 8px;
+            margin-top: 10px;
+            border-radius: 4px;
+        }
+        .rule-group legend { font-weight: bold; color: #aaf; padding: 0 5px; }
+        .param-group { margin-bottom: 5px; font-size: 0.9em; }
+        .param-group label { display: inline-block; width: 110px; }
+        .param-group input[type="range"] { width: 100px; vertical-align: middle; } /* Adjusted width */
+        .param-group span { display: inline-block; width: 20px; text-align: right; vertical-align: middle; }
+        hr { border-color: #444; margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <p><strong>General Controls</strong></p>
+        <button id="resetButton">Reset</button>
+        <button id="pauseButton">Pause</button>
+        <div>
+            <label for="speedSlider">Speed:</label>
+            <input type="range" id="speedSlider" min="50" max="1000" value="200" step="50">
+            <span id="speedValue">200ms</span>
+        </div>
+        <div>
+            <label for="initialPopSlider">Initial Pop (%):</label>
+            <input type="range" id="initialPopSlider" min="1" max="50" value="15" step="1">
+            <span id="initialPopValue">15%</span>
+        </div>
+        <p>Generation: <span id="generationCount">0</span></p>
+        <p>S1 (Rubik's): <span id="s1Count">0</span>, S2 (Solid): <span id="s2Count">0</span></p>
+        
+        <hr>
+        <p><strong>Ternary Game Rules (Neighbor Counts)</strong></p>
+        <div id="rulesContainer">
+            <!-- Rule sliders will be populated here by JS -->
+        </div>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        let scene, camera, renderer, controls;
+        let instancedMeshState1, instancedMeshState2; // State 1: Rubik's, State 2: Solid
+        let dummy; 
+
+        const GRID_SIZE = 15; 
+        const CELL_SIZE = 0.8;
+        const CELL_SPACING = 0.2;
+        const TOTAL_CELL_DIM = CELL_SIZE + CELL_SPACING;
+        const MAX_INSTANCES = GRID_SIZE * GRID_SIZE * GRID_SIZE;
+
+        let grid = [];
+        let nextGrid = [];
+
+        let generation = 0;
+        let isPaused = false;
+        let updateInterval = 200;
+        let initialPopulationPercentage = 15;
+
+        // Rubik's Colors: Right (+X) Red, Left (-X) Orange, Top (+Y) Blue, Bottom (-Y) Green, Front (+Z) White, Back (-Z) Yellow
+        const rubiksFaceColors = [
+            new THREE.Color(0xff0000), // Red   (px)
+            new THREE.Color(0xffa500), // Orange(nx)
+            new THREE.Color(0x0000ff), // Blue  (py)
+            new THREE.Color(0x00ff00), // Green (ny)
+            new THREE.Color(0xffffff), // White (pz)
+            new THREE.Color(0xffff00)  // Yellow(nz)
+        ];
+        let rubiksMaterials; // Array of 6 materials for InstancedMeshState1
+        let state2Material;  // Single material for InstancedMeshState2
+
+        // Default Game of Life Rules (min, max inclusive for neighbor counts)
+        // These will be updated by sliders
+        const RULES = {
+            S0_S1: { label: "Birth: Dead (0) -> Young (1)", count1: [3, 3], count2: [0, 1] },
+            S1_S1: { label: "Survival: Young (1) -> Young (1)", count1: [2, 3], count2: [0, 2] },
+            S1_S2: { label: "Maturation: Young (1) -> Mature (2)", count1: [1, 2], count2: [2, 3] },
+            S2_S2: { label: "Stability: Mature (2) -> Mature (2)", count1: [0, 2], count2: [2, 4] },
+            S2_S1: { label: "Rejuvenate: Mature (2) -> Young (1)", count1: [3, 4], count2: [0, 1] }
+        };
+        const RULE_KEYS = Object.keys(RULES); // ["S0_S1", "S1_S1", ...]
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x181818); // Darker background
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(GRID_SIZE * 1.1, GRID_SIZE * 1.1, GRID_SIZE * 1.1); // Slightly closer
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+
+            const ambientLight = new THREE.AmbientLight(0x707070); // Slightly brighter ambient
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.9); // Slightly less intense direct
+            directionalLight.position.set(1.5, 2, 1).normalize();
+            scene.add(directionalLight);
+
+            // Materials
+            rubiksMaterials = rubiksFaceColors.map(color => new THREE.MeshPhongMaterial({ color: color, shininess: 20 }));
+            state2Material = new THREE.MeshPhongMaterial({ color: 0x8A2BE2, shininess: 50 }); // BlueViolet
+
+            // Geometry (shared for both instanced meshes)
+            const geometry = new THREE.BoxGeometry(CELL_SIZE, CELL_SIZE, CELL_SIZE);
+            // BoxGeometry automatically creates material groups for its faces (px, nx, py, ny, pz, nz)
+            // which aligns with the order of rubiksFaceColors if used in an array.
+
+            instancedMeshState1 = new THREE.InstancedMesh(geometry, rubiksMaterials, MAX_INSTANCES);
+            instancedMeshState2 = new THREE.InstancedMesh(geometry, state2Material, MAX_INSTANCES);
+            scene.add(instancedMeshState1);
+            scene.add(instancedMeshState2);
+
+            dummy = new THREE.Object3D(); // Used for setting matrix of each instance
+
+            // Initialize Grids
+            for (let i = 0; i < GRID_SIZE; i++) {
+                grid[i] = []; nextGrid[i] = [];
+                for (let j = 0; j < GRID_SIZE; j++) {
+                    grid[i][j] = []; nextGrid[i][j] = [];
+                    for (let k = 0; k < GRID_SIZE; k++) {
+                        grid[i][j][k] = 0; nextGrid[i][j][k] = 0;
+                    }
+                }
+            }
+            
+            setupUI(); // Setup UI first to get initial values for rules and pop
+            resetSimulation(); // Then reset, which uses those values
+            animate();
+            gameLoop(); // Start the game logic loop
+        }
+
+        function resetSimulation() {
+            generation = 0;
+            document.getElementById('generationCount').textContent = generation;
+
+            // Clear grid
+            for (let i = 0; i < GRID_SIZE; i++) {
+                for (let j = 0; j < GRID_SIZE; j++) {
+                    for (let k = 0; k < GRID_SIZE; k++) {
+                        grid[i][j][k] = 0;
+                    }
+                }
+            }
+
+            // Populate initial cells (State 1)
+            const numInitialCells = Math.floor((initialPopulationPercentage / 100) * MAX_INSTANCES);
+            const allCoords = [];
+            for (let i = 0; i < GRID_SIZE; i++) {
+                for (let j = 0; j < GRID_SIZE; j++) {
+                    for (let k = 0; k < GRID_SIZE; k++) {
+                        allCoords.push({x:i, y:j, z:k});
+                    }
+                }
+            }
+
+            // Fisher-Yates shuffle to pick random unique coordinates
+            for (let i = allCoords.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [allCoords[i], allCoords[j]] = [allCoords[j], allCoords[i]];
+            }
+
+            for (let n = 0; n < numInitialCells; n++) {
+                if (n >= allCoords.length) break; // Should not happen if percentage is reasonable
+                const {x,y,z} = allCoords[n];
+                grid[x][y][z] = 1; // Start as State 1 (Rubik's)
+            }
+            updateVisuals();
+        }
+
+        function countNeighbors(x, y, z) {
+            const counts = { 1: 0, 2: 0 }; // Count for State 1 and State 2 neighbors
+            for (let i = -1; i <= 1; i++) {
+                for (let j = -1; j <= 1; j++) {
+                    for (let k = -1; k <= 1; k++) {
+                        if (i === 0 && j === 0 && k === 0) continue; // Skip self
+                        // Wrap-around boundaries
+                        const ni = (x + i + GRID_SIZE) % GRID_SIZE;
+                        const nj = (y + j + GRID_SIZE) % GRID_SIZE;
+                        const nk = (z + k + GRID_SIZE) % GRID_SIZE;
+                        const neighborState = grid[ni][nj][nk];
+                        if (neighborState === 1) counts[1]++;
+                        else if (neighborState === 2) counts[2]++;
+                    }
+                }
+            }
+            return counts;
+        }
+
+        function updateGameLogic() {
+            if (isPaused) return;
+
+            let s1LiveCount = 0;
+            let s2LiveCount = 0;
+
+            for (let i = 0; i < GRID_SIZE; i++) {
+                for (let j = 0; j < GRID_SIZE; j++) {
+                    for (let k = 0; k < GRID_SIZE; k++) {
+                        const currentState = grid[i][j][k];
+                        const neighbors = countNeighbors(i, j, k);
+                        let nextState = currentState;
+
+                        // Apply rules dynamically from the RULES object
+                        if (currentState === 0) { // Dead cell
+                            const rule = RULES.S0_S1; // Rule for: 0 -> 1
+                            if (neighbors[1] >= rule.count1[0] && neighbors[1] <= rule.count1[1] &&
+                                neighbors[2] >= rule.count2[0] && neighbors[2] <= rule.count2[1]) {
+                                nextState = 1;
+                            }
+                        } else if (currentState === 1) { // Young cell (State 1)
+                            const ruleStay = RULES.S1_S1;     // Rule for: 1 -> 1
+                            const ruleMature = RULES.S1_S2;   // Rule for: 1 -> 2
+                            if (neighbors[1] >= ruleStay.count1[0] && neighbors[1] <= ruleStay.count1[1] &&
+                                neighbors[2] >= ruleStay.count2[0] && neighbors[2] <= ruleStay.count2[1]) {
+                                nextState = 1;
+                            } else if (neighbors[1] >= ruleMature.count1[0] && neighbors[1] <= ruleMature.count1[1] &&
+                                       neighbors[2] >= ruleMature.count2[0] && neighbors[2] <= ruleMature.count2[1]) {
+                                nextState = 2;
+                            } else {
+                                nextState = 0; // Dies
+                            }
+                        } else if (currentState === 2) { // Mature cell (State 2)
+                            const ruleStay = RULES.S2_S2;         // Rule for: 2 -> 2
+                            const ruleRejuvenate = RULES.S2_S1; // Rule for: 2 -> 1
+                            if (neighbors[1] >= ruleStay.count1[0] && neighbors[1] <= ruleStay.count1[1] &&
+                                neighbors[2] >= ruleStay.count2[0] && neighbors[2] <= ruleStay.count2[1]) {
+                                nextState = 2;
+                            } else if (neighbors[1] >= ruleRejuvenate.count1[0] && neighbors[1] <= ruleRejuvenate.count1[1] &&
+                                       neighbors[2] >= ruleRejuvenate.count2[0] && neighbors[2] <= ruleRejuvenate.count2[1]) {
+                                nextState = 1;
+                            } else {
+                                nextState = 0; // Dies
+                            }
+                        }
+                        nextGrid[i][j][k] = nextState;
+                        if (nextState === 1) s1LiveCount++;
+                        else if (nextState === 2) s2LiveCount++;
+                    }
+                }
+            }
+
+            [grid, nextGrid] = [nextGrid, grid]; // Swap grids
+            
+            generation++;
+            document.getElementById('generationCount').textContent = generation;
+            document.getElementById('s1Count').textContent = s1LiveCount;
+            document.getElementById('s2Count').textContent = s2LiveCount;
+
+            updateVisuals();
+        }
+        
+        function updateVisuals() {
+            let instanceIdx = 0;
+            const centerOffset = -GRID_SIZE / 2 + 0.5; // To center grid at origin
+
+            for (let i = 0; i < GRID_SIZE; i++) {
+                for (let j = 0; j < GRID_SIZE; j++) {
+                    for (let k = 0; k < GRID_SIZE; k++) {
+                        const state = grid[i][j][k];
+                        
+                        const xPos = (i + centerOffset) * TOTAL_CELL_DIM;
+                        const yPos = (j + centerOffset) * TOTAL_CELL_DIM;
+                        const zPos = (k + centerOffset) * TOTAL_CELL_DIM;
+                        dummy.position.set(xPos, yPos, zPos);
+
+                        if (state === 1) { // Cell is State 1 (Rubik's)
+                            dummy.scale.set(1, 1, 1);
+                            dummy.updateMatrix();
+                            instancedMeshState1.setMatrixAt(instanceIdx, dummy.matrix);
+                            
+                            dummy.scale.set(0, 0, 0); // Make invisible in the State 2 mesh
+                            dummy.updateMatrix();
+                            instancedMeshState2.setMatrixAt(instanceIdx, dummy.matrix);
+                        } else if (state === 2) { // Cell is State 2 (Solid Color)
+                            dummy.scale.set(0, 0, 0); // Make invisible in the State 1 mesh
+                            dummy.updateMatrix();
+                            instancedMeshState1.setMatrixAt(instanceIdx, dummy.matrix);
+                            
+                            dummy.scale.set(1, 1, 1); // Visible in State 2 mesh
+                            dummy.updateMatrix();
+                            instancedMeshState2.setMatrixAt(instanceIdx, dummy.matrix);
+                        } else { // state === 0 (Dead)
+                            dummy.scale.set(0, 0, 0); // Invisible in both meshes
+                            dummy.updateMatrix();
+                            instancedMeshState1.setMatrixAt(instanceIdx, dummy.matrix);
+                            instancedMeshState2.setMatrixAt(instanceIdx, dummy.matrix);
+                        }
+                        instanceIdx++;
+                    }
+                }
+            }
+            instancedMeshState1.instanceMatrix.needsUpdate = true;
+            instancedMeshState2.instanceMatrix.needsUpdate = true;
+            // instancedMeshState1.count = MAX_INSTANCES; // Not strictly needed if always updating all
+            // instancedMeshState2.count = MAX_INSTANCES;
+        }
+
+        function gameLoop() {
+            setTimeout(() => {
+                if (!isPaused) {
+                    updateGameLogic();
+                }
+                gameLoop();
+            }, updateInterval);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        // Helper to create a group of sliders for a rule
+        function createRuleControlGroup(ruleKey, ruleData) {
+            const groupDiv = document.createElement('div');
+            groupDiv.className = 'rule-group';
+            
+            const legend = document.createElement('legend');
+            legend.textContent = ruleData.label;
+            groupDiv.appendChild(legend);
+
+            const params = ['count1', 'count2']; // 'count1' for S1 neighbors, 'count2' for S2 neighbors
+            const paramLabels = ['S1 Neighbors:', 'S2 Neighbors:'];
+
+            params.forEach((paramName, index) => {
+                const paramGroupDiv = document.createElement('div');
+                paramGroupDiv.className = 'param-group';
+                
+                const label = document.createElement('label');
+                label.textContent = paramLabels[index];
+                paramGroupDiv.appendChild(label);
+
+                // Min slider
+                const minSlider = document.createElement('input');
+                minSlider.type = 'range';
+                minSlider.min = 0; minSlider.max = 26; minSlider.step = 1; // Max 26 neighbors
+                minSlider.value = ruleData[paramName][0]; // Default min value
+                minSlider.id = `${ruleKey}_${paramName}_min`;
+                const minSpan = document.createElement('span');
+                minSpan.id = `${minSlider.id}_val`;
+                minSpan.textContent = minSlider.value;
+
+                minSlider.oninput = () => {
+                    minSpan.textContent = minSlider.value;
+                    ruleData[paramName][0] = parseInt(minSlider.value);
+                    // Ensure min <= max for this param
+                    const maxSlider = document.getElementById(`${ruleKey}_${paramName}_max`);
+                    if (parseInt(minSlider.value) > parseInt(maxSlider.value)) {
+                        maxSlider.value = minSlider.value; // Adjust max slider
+                        maxSlider.dispatchEvent(new Event('input')); // Trigger its update logic
+                    }
+                };
+                paramGroupDiv.appendChild(document.createTextNode(' Min:'));
+                paramGroupDiv.appendChild(minSlider);
+                paramGroupDiv.appendChild(minSpan);
+
+                // Max slider
+                const maxSlider = document.createElement('input');
+                maxSlider.type = 'range';
+                maxSlider.min = 0; maxSlider.max = 26; maxSlider.step = 1;
+                maxSlider.value = ruleData[paramName][1]; // Default max value
+                maxSlider.id = `${ruleKey}_${paramName}_max`;
+                const maxSpan = document.createElement('span');
+                maxSpan.id = `${maxSlider.id}_val`;
+                maxSpan.textContent = maxSlider.value;
+
+                maxSlider.oninput = () => {
+                    maxSpan.textContent = maxSlider.value;
+                    ruleData[paramName][1] = parseInt(maxSlider.value);
+                    // Ensure min <= max for this param
+                    const minSliderLinked = document.getElementById(`${ruleKey}_${paramName}_min`);
+                     if (parseInt(maxSlider.value) < parseInt(minSliderLinked.value)) {
+                        minSliderLinked.value = maxSlider.value; // Adjust min slider
+                        minSliderLinked.dispatchEvent(new Event('input')); // Trigger its update logic
+                    }
+                };
+                paramGroupDiv.appendChild(document.createTextNode(' Max:'));
+                paramGroupDiv.appendChild(maxSlider);
+                paramGroupDiv.appendChild(maxSpan);
+
+                groupDiv.appendChild(paramGroupDiv);
+            });
+            return groupDiv;
+        }
+
+        function setupUI() {
+            document.getElementById('resetButton').addEventListener('click', () => {
+                // Pause, reset, then unpause to avoid issues during reset
+                const wasPaused = isPaused;
+                isPaused = true; 
+                document.getElementById('pauseButton').textContent = 'Play';
+                
+                resetSimulation(); // This will use current slider values for pop
+                
+                if (!wasPaused) {
+                    isPaused = false; 
+                    document.getElementById('pauseButton').textContent = 'Pause';
+                }
+            });
+            
+            const pauseButton = document.getElementById('pauseButton');
+            pauseButton.addEventListener('click', () => {
+                isPaused = !isPaused;
+                pauseButton.textContent = isPaused ? 'Play' : 'Pause';
+            });
+
+            const speedSlider = document.getElementById('speedSlider');
+            const speedValueSpan = document.getElementById('speedValue');
+            speedSlider.addEventListener('input', (event) => {
+                updateInterval = parseInt(event.target.value);
+                speedValueSpan.textContent = `${updateInterval}ms`;
+            });
+            updateInterval = parseInt(speedSlider.value); // Set initial value
+            speedValueSpan.textContent = `${updateInterval}ms`;
+
+            const initialPopSlider = document.getElementById('initialPopSlider');
+            const initialPopValueSpan = document.getElementById('initialPopValue');
+            initialPopSlider.addEventListener('input', (event) => {
+                initialPopulationPercentage = parseInt(event.target.value);
+                initialPopValueSpan.textContent = `${initialPopulationPercentage}%`;
+                // Note: Reset is needed to apply new initial population
+            });
+            initialPopulationPercentage = parseInt(initialPopSlider.value); // Set initial value
+            initialPopValueSpan.textContent = `${initialPopulationPercentage}%`;
+
+            // Populate rule sliders into the 'rulesContainer' div
+            const rulesContainer = document.getElementById('rulesContainer');
+            RULE_KEYS.forEach(key => {
+                const ruleControlElement = createRuleControlGroup(key, RULES[key]);
+                rulesContainer.appendChild(ruleControlElement);
+            });
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }, false);
+
+        init();
+    </script>
+</body>
+</html>
